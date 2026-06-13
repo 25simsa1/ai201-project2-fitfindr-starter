@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,15 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+# Model used by the two LLM-backed tools. See planning.md.
+_MODEL = "llama-3.3-70b-versatile"
+
+# Tiny words ignored when scoring keyword overlap in search_listings.
+_STOPWORDS = {
+    "a", "an", "the", "for", "with", "and", "or", "to", "of", "in", "on",
+    "under", "less", "than", "my", "i", "im", "looking", "want", "find",
+}
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -32,6 +42,59 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+# ── prompt + fallback helpers ───────────────────────────────────────────────
+
+def _describe_item(item: dict) -> str:
+    """One-line description of a listing for use in an LLM prompt."""
+    if not isinstance(item, dict):
+        return str(item)
+    tags = ", ".join(item.get("style_tags", []))
+    colors = ", ".join(item.get("colors", []))
+    return (
+        f"{item.get('title', 'Unknown item')} "
+        f"(category {item.get('category', 'n/a')}; colors {colors or 'n/a'}; "
+        f"tags {tags or 'n/a'})"
+    )
+
+
+def _describe_wardrobe_item(w: dict) -> str:
+    """One-line description of a wardrobe item for use in an LLM prompt."""
+    tags = ", ".join(w.get("style_tags", []))
+    note = w.get("notes")
+    base = f"{w.get('name', 'item')} ({w.get('category', 'n/a')}, {tags or 'no tags'})"
+    return f"{base}. {note}" if note else base
+
+
+def _outfit_fallback(new_item: dict, has_wardrobe: bool) -> str:
+    """Plain styling message used when the LLM call is unavailable."""
+    title = new_item.get("title", "this piece") if isinstance(new_item, dict) else "this piece"
+    tags = ", ".join(new_item.get("style_tags", [])) if isinstance(new_item, dict) else ""
+    vibe = f" Its {tags} vibe pairs well with simple, complementary basics." if tags else ""
+    if has_wardrobe:
+        return (
+            f"Style {title} with the most neutral pieces in your wardrobe first, "
+            f"then layer a jacket or overshirt on top and finish with shoes that "
+            f"match the formality.{vibe}"
+        )
+    return (
+        f"Your closet is empty, so here are some starting ideas for {title}. "
+        f"Build around it with well-fitting bottoms, one layering piece, and "
+        f"shoes that suit the occasion.{vibe}"
+    )
+
+
+def _fitcard_fallback(new_item: dict) -> str:
+    """Plain caption used when the LLM call is unavailable."""
+    title = new_item.get("title", "this find") if isinstance(new_item, dict) else "this find"
+    price = new_item.get("price") if isinstance(new_item, dict) else None
+    platform = new_item.get("platform", "secondhand") if isinstance(new_item, dict) else "secondhand"
+    price_str = f"${price:g}" if isinstance(price, (int, float)) else "a great price"
+    return (
+        f"thrifted {title} on {platform} for {price_str} and i'm obsessed. "
+        f"already planning three outfits around it."
+    )
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +132,39 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    tokens = [
+        t for t in re.findall(r"[a-z0-9]+", (description or "").lower())
+        if t not in _STOPWORDS
+    ]
+    size_needle = size.strip().lower() if isinstance(size, str) and size.strip() else None
+
+    scored = []
+    for item in listings:
+        if max_price is not None and item["price"] > max_price:
+            continue
+        if size_needle is not None and size_needle not in item["size"].lower():
+            continue
+
+        haystack = " ".join([
+            item["title"],
+            item["description"],
+            " ".join(item["style_tags"]),
+            " ".join(item["colors"]),
+            item["category"],
+            item["brand"] or "",
+        ]).lower()
+
+        score = sum(1 for tok in set(tokens) if tok in haystack)
+        if score == 0:
+            continue
+
+        scored.append((score, item["price"], item))
+
+    # Best keyword overlap first, cheaper item wins ties.
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [item for _score, _price, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +194,44 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    items = (wardrobe or {}).get("items", [])
+    item_line = _describe_item(new_item)
+
+    if items:
+        closet = "\n".join("- " + _describe_wardrobe_item(w) for w in items)
+        user_prompt = (
+            f"New thrifted item:\n{item_line}\n\n"
+            f"The user's wardrobe:\n{closet}\n\n"
+            "Suggest one or two complete outfits built around the new item. "
+            "Name the specific wardrobe pieces you would pair it with and add a "
+            "short, concrete styling tip such as how to tuck, cuff, or layer."
+        )
+    else:
+        user_prompt = (
+            f"New thrifted item:\n{item_line}\n\n"
+            "The user has not entered any wardrobe pieces yet. Give general "
+            "styling ideas for this item, what kinds of pieces pair well with it "
+            "and what vibe it suits. Keep it short and practical."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content":
+                    "You are a friendly thrift stylist. Be specific and concise."},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    return _outfit_fallback(new_item, has_wardrobe=bool(items))
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +263,41 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return (
+            "I need an outfit idea before I can write a fit card. "
+            "Run a search and outfit step first, then try again."
+        )
+
+    title = new_item.get("title", "this piece") if isinstance(new_item, dict) else "this piece"
+    price = new_item.get("price") if isinstance(new_item, dict) else None
+    platform = new_item.get("platform", "secondhand") if isinstance(new_item, dict) else "secondhand"
+    price_str = f"${price:g}" if isinstance(price, (int, float)) else "a steal"
+
+    user_prompt = (
+        f"Item: {title}, {price_str}, found on {platform}.\n"
+        f"Outfit: {outfit}\n\n"
+        "Write a short, shareable caption for this look, the kind someone posts "
+        "with an outfit photo. Two to four sentences. Mention the item name, "
+        f"price ({price_str}), and platform ({platform}) once each. Sound like a "
+        "real person, casual and specific, not a product description."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content":
+                    "You write casual, authentic outfit captions for social media."},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=1.0,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    return _fitcard_fallback(new_item)
