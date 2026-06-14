@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -43,6 +45,60 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
     }
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Pull a search description, an optional size, and an optional max_price out
+    of a free-text query using regular expressions. Matches step 2 of the
+    Planning Loop section in planning.md.
+    """
+    q = query or ""
+    low = q.lower()
+
+    # max_price: "under $30", "less than 30", "$30", or "30 dollars".
+    max_price = None
+    m = re.search(r"(?:under|below|less than|max|up to|around)\s*\$?\s*(\d+(?:\.\d+)?)", low)
+    if not m:
+        m = re.search(r"\$\s*(\d+(?:\.\d+)?)", low)
+    if not m:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars|usd|bucks)", low)
+    if m:
+        max_price = float(m.group(1))
+
+    # size: an explicit "size X" wins; otherwise a standalone multi-letter size.
+    size = None
+    m = re.search(r"\bsize\s+([a-z0-9][a-z0-9/]*)", low)
+    if m:
+        size = m.group(1).upper()
+    else:
+        m = re.search(r"\b(xxs|xs|xl|xxl|xxxl)\b", low)
+        if m:
+            size = m.group(1).upper()
+
+    # description: the first sentence, with the price phrase, size phrase, and
+    # leading filler removed so they do not pollute the keyword search.
+    desc = q.split(".")[0]
+    desc = re.sub(r"(?:under|below|less than|max|up to|around)\s*\$?\s*\d+(?:\.\d+)?", " ", desc, flags=re.I)
+    desc = re.sub(r"\$\s*\d+(?:\.\d+)?", " ", desc)
+    desc = re.sub(r"\d+(?:\.\d+)?\s*(?:dollars|usd|bucks)", " ", desc, flags=re.I)
+    desc = re.sub(r"\bsize\s+[a-z0-9][a-z0-9/]*", " ", desc, flags=re.I)
+    desc = re.sub(r"\b(?:xxs|xs|xl|xxl|xxxl)\b", " ", desc, flags=re.I)
+    desc = re.sub(
+        r"^\s*(?:i\s*'?\s*m\s+|i\s+am\s+)?"
+        r"(?:looking\s+for|searching\s+for|want|need|find\s+me|show\s+me|get\s+me)\s+"
+        r"(?:a|an|some)?\s*",
+        " ", desc, flags=re.I,
+    )
+    desc = re.sub(r"\b(?:in|for|size)\s*$", "", desc.strip(), flags=re.I)
+    desc = re.sub(r"\s+", " ", desc).strip(" ,")
+
+    if not desc:
+        desc = q.strip()
+
+    return {"description": desc, "size": size, "max_price": max_price}
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -92,9 +148,48 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into description / size / max_price.
+    session["parsed"] = _parse_query(query)
+    parsed = session["parsed"]
+
+    # Step 3: search the listings.
+    session["search_results"] = search_listings(
+        parsed["description"], size=parsed["size"], max_price=parsed["max_price"]
+    )
+
+    # Step 4: branch on the result. Empty means stop here, before any styling.
+    if not session["search_results"]:
+        bits = [f"\"{parsed['description']}\""]
+        if parsed["size"]:
+            bits.append(f"size {parsed['size']}")
+        if parsed["max_price"] is not None:
+            bits.append(f"under ${parsed['max_price']:g}")
+        session["error"] = (
+            "No listings matched " + ", ".join(bits) + ". "
+            "Try a higher budget, dropping the size, or broader keywords."
+        )
+        return session
+
+    # The found item flows forward through the session, no re-entry by the user.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: style the selected item against the wardrobe.
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+    if not session["outfit_suggestion"] or not session["outfit_suggestion"].strip():
+        session["error"] = "Could not generate an outfit for the selected item."
+        return session
+
+    # Step 6: caption the look.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: done.
     return session
 
 
