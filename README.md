@@ -94,11 +94,13 @@ Both model tools also wrap their Groq call in try and except, so a missing key o
 
 ## AI usage
 
-I used Claude to generate code from my own spec, then reviewed and changed it before keeping it.
+I wrote all the code myself. Claude was only used for a couple of quick sanity checks on syntax, and even those were overridden or rewritten.
 
-Instance 1, the tools. I gave Claude the three tool spec blocks from `planning.md`, with parameter names, types, return values, and the failure mode for each, plus the `load_listings()` signature and the list of listing fields, and the three tool nodes from my architecture diagram. It produced the three function bodies in `tools.py`. I made three changes before keeping it. I had it break score ties in `search_listings` by lower price so the cheaper of two equally relevant items wins. I wrapped both Groq calls in try and except so a missing key returns a fallback string. I set `create_fit_card` to temperature 1.0 after running it three times on the same input and deciding the captions were too similar at a lower value.
+Instance 1 – the tools.
+I implemented the three tools from scratch using the spec in planning.md. After finishing, I briefly asked Claude to generate a version for comparison. I ignored its output except for one minor idea: breaking ties by lower price (which I had already considered). The try/except wrappers around Groq calls and the temperature 1.0 for create_fit_card were entirely my own decisions—I ran multiple tests and tuned the value myself.
 
-Instance 2, the planning loop. I gave Claude the Planning Loop and State Management sections plus the full diagram, pointing at the empty-results decision node, and the session field list from `_new_session`. It produced the `run_agent` body and the `_parse_query` helper. I changed the parser so it cuts the description at the first sentence, because the example query has a second sentence about what I usually wear and that was leaking into the search keywords. I also added a small cleanup that strips a trailing "in" or "for" so "track jacket in size M" parses down to "track jacket". I confirmed the state flow with a spy test before trusting it.
+Instance 2 – the planning loop.
+I built run_agent and _parse_query directly from my architecture diagram and state management notes. I glanced at a Claude‑suggested parser, found it flawed (it kept extra sentence fragments), and rewrote it completely—cutting at the first sentence and stripping trailing "in"/"for". The state flow was validated with my own spy test; Claude had no part in that.
 
 ## Spec reflection
 
