@@ -102,9 +102,11 @@ Instance 2, the planning loop. I gave Claude the Planning Loop and State Managem
 
 ## Spec reflection
 
-Most of the build matched the plan. The loop, the session handoffs, and the three failure modes all behave the way `planning.md` describes.
+The spec helped most when I got to the planning loop. I had written it branch by branch in `planning.md` before I touched `agent.py`, so `run_agent` came out as close to a transcription of that section. Because I had already drawn the empty-results branch on paper, the early exit and the error message were part of the design from the start, and I never had to bolt error handling on at the end.
 
-Two things came out different from the walkthrough once I ran it on the dataset. First, my walkthrough predicted the bootleg graphic tee as the top hit for "vintage graphic tee", but the code returns the Y2K Baby Tee. Both score the same on keyword overlap, and my tie-break prefers the cheaper one, so the $18 tee wins over the $24 one. The code is doing what I told it, the example in the doc was just an assumption. Second, the keyword search is loose. The word "vintage" is a tag on most of the dataset, so a query containing it returns a long list. That does not hurt the agent since it only uses the top result, but if I extended this I would add a relevance threshold or weight rarer keywords higher so the ranking is tighter. I would also move query parsing from regex toward something sturdier, since the regex handles the example queries well but would miss less standard phrasings.
+Where the build diverged was the top result. My `planning.md` walkthrough predicted the bootleg graphic tee as the top hit for "vintage graphic tee", but the code returns the Y2K Baby Tee. I wrote that walkthrough before building the scoring, so it was an assumption. Once I had the scoring working, both tees tied on keyword overlap and my tie-break prefers the cheaper one, so the $18 tee beats the $24 one. The code does what I told it, the doc just guessed the wrong winner, and I left the code alone and noted the mismatch rather than bending the ranking to fit an old guess.
+
+If I kept going I would tighten the keyword search. The word "vintage" is a tag on most of the dataset, so a query with it returns a long list. That does not hurt the agent since it only uses the top result, but a relevance threshold or weighting rarer words higher would sharpen the ranking. I would also move query parsing off regex toward something sturdier, since the regex handles the example queries but would miss less standard phrasings.
 
 ## Demo
 
